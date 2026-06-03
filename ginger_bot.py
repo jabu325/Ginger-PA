@@ -12,8 +12,10 @@ Usage:
 import asyncio
 import json
 import logging
+import re
 import requests
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +31,8 @@ from memory_manager import (
     detect_and_update_memory,
     add_conversation,
 )
+from scraper import PageFetcher, MediaFinder, MediaDownloader
+from scraper.url_utils import URLUtils
 
 # Setup logging
 logging.basicConfig(
@@ -153,8 +157,193 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Commands:\n"
         "/memory - Show what I remember\n"
         "/clear - Clear my memory\n"
+        "/download <formats> [limit] <url> - Download media from a webpage\n"
         "/start - Welcome message"
     )
+
+
+async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /download command."""
+    await update.message.chat.send_action("typing")
+    args = context.args
+    parsed = _parse_download_args(args)
+    if not parsed:
+        await update.message.reply_text(
+            "Usage: /download <formats> [limit] <url>\n"
+            "Example: /download gif 3 https://example.com/gallery"
+        )
+        return
+
+    formats, max_files, url = parsed
+    await update.message.reply_text(
+        f"Downloading up to {max_files or 'all'} {', '.join(formats)} file(s) from {url}..."
+    )
+
+    try:
+        output_dir, downloaded, failed = await asyncio.to_thread(_download_media_from_url, url, formats, max_files)
+        summary = _format_download_summary(output_dir, downloaded, failed)
+        await update.message.reply_text(summary)
+        if downloaded:
+            await _send_downloaded_files(update, context, downloaded)
+    except Exception as e:
+        logger.error(f"Download command error: {e}")
+        await update.message.reply_text(f"⚠️ Failed to download media: {e}")
+
+
+def _create_output_directory(url: str) -> Path:
+    """Create a unique output directory for each URL request."""
+    domain = URLUtils.get_domain_name(url)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = Path(__file__).resolve().parent / "downloads" / f"{domain}_{timestamp}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
+def _parse_download_args(args: list[str]) -> tuple[list[str], int, str] | None:
+    """Parse /download command arguments."""
+    if len(args) < 2:
+        return None
+
+    url = args[-1].strip()
+    if not URLUtils.validate_url(url):
+        return None
+
+    formats = []
+    max_files = 0
+    for token in args[:-1]:
+        normalized = token.lower().strip(',')
+        if normalized.isdigit():
+            max_files = int(normalized)
+            continue
+        if normalized.endswith('s'):
+            normalized = normalized[:-1]
+        if normalized in URLUtils.SUPPORTED_FORMATS:
+            formats.append(normalized)
+
+    if not formats:
+        formats = ['gif']
+
+    return formats, max_files, url
+
+
+def _extract_download_request(text: str) -> tuple[list[str], int, str] | None:
+    """Detect a natural-language download request and extract arguments."""
+    text_lower = text.lower()
+    if 'download' not in text_lower and 'grab' not in text_lower and 'fetch' not in text_lower:
+        return None
+
+    url_match = re.search(r"(https?://[^\s'\"]+)", text)
+    if not url_match:
+        return None
+
+    url = url_match.group(1).rstrip('.,!')
+    if not URLUtils.validate_url(url):
+        return None
+
+    formats = []
+    for fmt in URLUtils.SUPPORTED_FORMATS:
+        if re.search(rf"\b{fmt}s?\b", text_lower):
+            formats.append(fmt)
+
+    if not formats:
+        if 'gif' in text_lower:
+            formats = ['gif']
+        elif 'jpg' in text_lower or 'jpeg' in text_lower:
+            formats = ['jpg']
+        elif 'png' in text_lower:
+            formats = ['png']
+        elif 'mp4' in text_lower:
+            formats = ['mp4']
+        elif 'webm' in text_lower:
+            formats = ['webm']
+        else:
+            return None
+
+    max_files = 0
+    limit_match = re.search(r"limit\s+(\d+)", text_lower)
+    if limit_match:
+        max_files = int(limit_match.group(1))
+
+    return formats, max_files, url
+
+
+def _download_media_from_url(url: str, formats: list[str], max_files: int = 0) -> tuple[Path, list[Path], list[str]]:
+    """Download media from a URL and return the saved file paths."""
+    fetcher = PageFetcher()
+    downloader = MediaDownloader()
+    try:
+        html, message = fetcher.fetch_page(url)
+        if not html:
+            raise ValueError(message)
+
+        media_urls = MediaFinder.find_media_urls(html, url, formats)
+        if not media_urls:
+            raise ValueError("No media files found matching the selected formats.")
+
+        if max_files > 0:
+            media_urls = media_urls[:max_files]
+
+        output_dir = _create_output_directory(url)
+        downloader.download_media(media_urls, str(output_dir), show_progress=False)
+
+        downloaded = []
+        failed = downloader.download_stats.get('failed_urls', [])
+        for path in output_dir.iterdir():
+            if path.is_file():
+                downloaded.append(path)
+
+        return output_dir, downloaded, failed
+    finally:
+        fetcher.close()
+        downloader.close()
+
+
+def _format_download_summary(output_dir: Path, downloaded: list[Path], failed: list[str]) -> str:
+    """Return a simple status summary for the bot."""
+    lines = [
+        f"Downloaded {len(downloaded)} file(s) to {output_dir.name}."
+    ]
+    if failed:
+        lines.append(f"Failed downloads: {len(failed)}")
+    return "\n".join(lines)
+
+
+def _get_media_sender_method(file_path: Path):
+    suffix = file_path.suffix.lower()
+    if suffix == '.gif':
+        return 'animation'
+    if suffix in ['.jpg', '.jpeg', '.png']:
+        return 'photo'
+    if suffix in ['.mp4', '.webm']:
+        return 'video'
+    return 'document'
+
+
+def _generate_file_caption(file_path: Path) -> str:
+    return f"Downloaded file: {file_path.name}"
+
+
+async def _send_downloaded_files(update: Update, context: ContextTypes.DEFAULT_TYPE, files: list[Path]) -> int:
+    """Send downloaded files to the Telegram chat."""
+    sent_count = 0
+    for file_path in sorted(files):
+        try:
+            if _get_media_sender_method(file_path) == 'animation':
+                with open(file_path, 'rb') as f:
+                    await update.message.reply_animation(animation=f, caption=_generate_file_caption(file_path))
+            elif _get_media_sender_method(file_path) == 'photo':
+                with open(file_path, 'rb') as f:
+                    await update.message.reply_photo(photo=f, caption=_generate_file_caption(file_path))
+            elif _get_media_sender_method(file_path) == 'video':
+                with open(file_path, 'rb') as f:
+                    await update.message.reply_video(video=f, caption=_generate_file_caption(file_path))
+            else:
+                with open(file_path, 'rb') as f:
+                    await update.message.reply_document(document=f, caption=_generate_file_caption(file_path))
+            sent_count += 1
+        except Exception as e:
+            logger.warning(f"Failed to send {file_path.name}: {e}")
+    return sent_count
 
 
 async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -198,6 +387,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     # Show typing indicator
     await update.message.chat.send_action("typing")
+
+    # Check for natural download request in text
+    download_request = _extract_download_request(user_message)
+    if download_request:
+        formats, max_files, url = download_request
+        await update.message.reply_text(
+            f"Sure! Downloading up to {max_files or 'all'} {', '.join(formats)} file(s) from {url}..."
+        )
+        try:
+            output_dir, downloaded, failed = await asyncio.to_thread(_download_media_from_url, url, formats, max_files)
+            summary = _format_download_summary(output_dir, downloaded, failed)
+            await update.message.reply_text(summary)
+            if downloaded:
+                await _send_downloaded_files(update, context, downloaded)
+            return
+        except Exception as e:
+            logger.error(f"Natural download error: {e}")
+            await update.message.reply_text(f"⚠️ I couldn't download media: {e}")
+            return
     
     # Load memory
     memory = load_memory()
@@ -341,23 +549,33 @@ async def on_app_init(app: Application) -> None:
 
 def main():
     """Start the bot."""
-    logger.info("Starting GingerAI Telegram Bot...")
-    logger.info(f"Using model: {config.DEFAULT_MODEL}")
-    logger.info(f"Ollama host: {config.OLLAMA_HOST}")
-    
-    # Create application
-    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(on_app_init).build()
-    
-    # Add handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("memory", memory_command))
-    app.add_handler(CommandHandler("clear", clear_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    try:
+        logger.info("Starting GingerAI Telegram Bot...")
+        logger.info(f"Using model: {config.DEFAULT_MODEL}")
+        logger.info(f"Ollama host: {config.OLLAMA_HOST}")
+        
+        # Explicitly create and set event loop for Windows Python 3.14
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Create application
+        app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(on_app_init).build()
+        
+        # Add handlers
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("help", help_command))
+        app.add_handler(CommandHandler("memory", memory_command))
+        app.add_handler(CommandHandler("clear", clear_command))
+        app.add_handler(CommandHandler("download", download_command))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Start polling
-    logger.info("Bot is polling for messages...")
-    app.run_polling()
+        # Start polling - let python-telegram-bot use the event loop
+        logger.info("Bot is polling for messages...")
+        app.run_polling()
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user.")
+    finally:
+        loop.close()
 
 
 if __name__ == "__main__":
