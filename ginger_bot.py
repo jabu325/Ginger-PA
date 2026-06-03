@@ -202,12 +202,25 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 def _create_output_directory(url: str) -> Path:
-    """Create a unique output directory for each URL request."""
+    """Create a unique numbered output directory for each URL request."""
     domain = URLUtils.get_domain_name(url)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(__file__).resolve().parent / "downloads" / f"{domain}_{timestamp}"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir
+    base_dir = Path(__file__).resolve().parent / "downloads"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Find next available numbered folder
+    counter = 1
+    while True:
+        if counter == 1:
+            output_dir = base_dir / domain
+        else:
+            output_dir = base_dir / f"{domain}_{counter}"
+        
+        if not output_dir.exists():
+            output_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Created download folder: {output_dir.name}")
+            return output_dir
+        
+        counter += 1
 
 
 def _parse_download_args(args: list[str]) -> tuple[list[str], int, str] | None:
@@ -283,16 +296,23 @@ def _download_media_from_url(url: str, formats: list[str], max_files: int = 0) -
     fetcher = PageFetcher()
     downloader = MediaDownloader()
     try:
+        logger.info(f"Starting download from {url} for formats: {formats}, max_files: {max_files}")
+        
         html, message = fetcher.fetch_page(url)
         if not html:
             raise ValueError(message)
+        
+        logger.info(f"Page fetched: {message}")
 
         media_urls = MediaFinder.find_media_urls(html, url, formats)
+        logger.info(f"Found {len(media_urls)} media URLs")
+        
         if not media_urls:
             raise ValueError("No media files found matching the selected formats.")
 
         if max_files > 0:
             media_urls = media_urls[:max_files]
+            logger.info(f"Limited to {len(media_urls)} files (requested {max_files})")
 
         output_dir = _create_output_directory(url)
         downloader.download_media(media_urls, str(output_dir), show_progress=False)
@@ -303,6 +323,8 @@ def _download_media_from_url(url: str, formats: list[str], max_files: int = 0) -
             if path.is_file():
                 downloaded.append(path)
 
+        logger.info(f"Download complete: {len(downloaded)} successful, {len(failed)} failed")
+        
         if not downloaded and failed:
             # All downloads failed
             error_reason = "Access forbidden (403) - website blocks this scraper"
