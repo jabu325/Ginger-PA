@@ -9,7 +9,7 @@ BASE_DIR = Path(__file__).resolve().parent
 MEMORY_FILE = BASE_DIR / "memory.json"
 
 # Telegram settings
-TELEGRAM_BOT_TOKEN = "8995070933:AAHhzqJ939NuIQJTlceMPB8NoLFToV_K9dE"
+TELEGRAM_BOT_TOKEN = "enter_bot_token_here"
 POLLING_INTERVAL = 1  # seconds
 
 # Ollama settings
