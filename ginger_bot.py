@@ -186,8 +186,19 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if downloaded:
             await _send_downloaded_files(update, context, downloaded)
     except Exception as e:
-        logger.error(f"Download command error: {e}")
-        await update.message.reply_text(f"⚠️ Failed to download media: {e}")
+        error_msg = str(e)
+        if '403' in error_msg:
+            await update.message.reply_text(
+                f"⚠️ Access Denied (403)\n\n"
+                f"The website blocks media downloads. This is common on:\n"
+                f"• Sites with strong anti-scraping measures\n"
+                f"• Protected image galleries\n"
+                f"• Paid content sites\n\n"
+                f"Try a different website or URL."
+            )
+        else:
+            logger.error(f"Download command error: {error_msg}")
+            await update.message.reply_text(f"⚠️ Failed to download media: {error_msg}")
 
 
 def _create_output_directory(url: str) -> Path:
@@ -291,6 +302,13 @@ def _download_media_from_url(url: str, formats: list[str], max_files: int = 0) -
         for path in output_dir.iterdir():
             if path.is_file():
                 downloaded.append(path)
+
+        if not downloaded and failed:
+            # All downloads failed
+            error_reason = "Access forbidden (403) - website blocks this scraper"
+            if any('403' in str(err) for err in failed):
+                error_reason = "Access forbidden (403) - website blocks this scraper"
+            raise ValueError(f"Could not download any files. Reason: {error_reason}")
 
         return output_dir, downloaded, failed
     finally:
@@ -403,8 +421,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await _send_downloaded_files(update, context, downloaded)
             return
         except Exception as e:
-            logger.error(f"Natural download error: {e}")
-            await update.message.reply_text(f"⚠️ I couldn't download media: {e}")
+            error_msg = str(e)
+            if '403' in error_msg:
+                await update.message.reply_text(
+                    "⚠️ Access Denied (403)\n\n"
+                    "The website blocks media downloads from scrapers.\n"
+                    "Try a different website or URL."
+                )
+            else:
+                logger.error(f"Natural download error: {error_msg}")
+                await update.message.reply_text(f"⚠️ I couldn't download media: {error_msg}")
             return
     
     # Load memory

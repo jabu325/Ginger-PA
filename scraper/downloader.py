@@ -38,7 +38,7 @@ class MediaDownloader:
         }
     
     def _create_session(self) -> requests.Session:
-        """Create requests session with retry strategy"""
+        """Create requests session with retry strategy and browser-like headers"""
         session = requests.Session()
         
         retry_strategy = Retry(
@@ -51,8 +51,17 @@ class MediaDownloader:
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("http://", adapter)
         session.mount("https://", adapter)
+        
+        # Browser-like headers to avoid 403 Forbidden
         session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.google.com/',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
         })
         
         return session
@@ -99,18 +108,7 @@ class MediaDownloader:
             bool: True if successful, False otherwise
         """
         try:
-            # Get file info
-            response = self.session.head(url, timeout=self.timeout, allow_redirects=True)
-            
-            if response.status_code != 200:
-                logger.warning(f"Head request failed for {url}: {response.status_code}")
-                self.download_stats['failed'] += 1
-                self.download_stats['failed_urls'].append(url)
-                return False
-            
-            file_size = int(response.headers.get('content-length', 0))
             filename = URLUtils.get_filename_from_url(url)
-            
             if not filename:
                 filename = 'media'
             
@@ -118,16 +116,35 @@ class MediaDownloader:
             filepath = Path(output_dir) / filename
             filepath = self._get_unique_filename(filepath)
             
-            # Download file
+            # Try HEAD request to get file size (optional)
+            file_size = 0
+            try:
+                head_response = self.session.head(url, timeout=self.timeout, allow_redirects=True)
+                if head_response.status_code == 200:
+                    file_size = int(head_response.headers.get('content-length', 0))
+            except Exception as e:
+                logger.debug(f"HEAD request failed for {url}: {e}. Will try GET anyway.")
+            
+            # Download file with GET
             response = self.session.get(url, timeout=self.timeout, stream=True)
+            
+            if response.status_code == 403:
+                logger.warning(f"Access forbidden (403) for {url} - website may block scrapers")
+                self.download_stats['failed'] += 1
+                self.download_stats['failed_urls'].append(url)
+                return False
+            elif response.status_code == 404:
+                logger.warning(f"Not found (404): {url}")
+                self.download_stats['failed'] += 1
+                self.download_stats['failed_urls'].append(url)
+                return False
+            
             response.raise_for_status()
             
             with open(filepath, 'wb') as f:
-                downloaded = 0
                 for chunk in response.iter_content(chunk_size=self.chunk_size):
                     if chunk:
                         f.write(chunk)
-                        downloaded += len(chunk)
             
             actual_size = filepath.stat().st_size
             self.download_stats['successful'] += 1
@@ -137,7 +154,11 @@ class MediaDownloader:
             return True
             
         except requests.exceptions.RequestException as e:
-            logger.warning(f"Failed to download {url}: {e}")
+            error_msg = str(e)
+            if '403' in error_msg:
+                logger.warning(f"HTTP 403 Forbidden for {url} - website blocks this request")
+            else:
+                logger.warning(f"Failed to download {url}: {error_msg}")
             self.download_stats['failed'] += 1
             self.download_stats['failed_urls'].append(url)
             return False
