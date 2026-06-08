@@ -2,6 +2,7 @@
 Configuration for GingerAI Telegram Bot with Ollama Memory
 """
 
+import os
 from pathlib import Path
 
 # File paths
@@ -9,7 +10,7 @@ BASE_DIR = Path(__file__).resolve().parent
 MEMORY_FILE = BASE_DIR / "memory.json"
 
 # Telegram settings
-TELEGRAM_BOT_TOKEN = "enter_bot_token_here"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 POLLING_INTERVAL = 1  # seconds
 
 # Ollama settings

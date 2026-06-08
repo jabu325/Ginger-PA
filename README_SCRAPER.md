@@ -5,7 +5,7 @@ A powerful Python application for scraping and downloading media files from webs
 ## Features
 
 ✅ **URL Validation** - Validates URL format and reachability
-✅ **Format Selection** - Choose from GIF, WEBM, MP4, JPG, PNG
+✅ **Format Selection** - Choose from GIF, WEBP, MP4, JPG, PNG
 ✅ **HTML Parsing** - Extracts media from img, video, source, and picture tags
 ✅ **Smart Downloading** - Stream downloads with progress tracking
 ✅ **Duplicate Detection** - Automatic deduplication using sets
@@ -18,7 +18,7 @@ A powerful Python application for scraping and downloading media files from webs
 ## Supported Formats
 
 - **GIF** - `.gif`
-- **WEBM** - `.webm`
+- **WEBP** - `.webp`
 - **MP4** - `.mp4`
 - **JPG** - `.jpg`, `.jpeg`
 - **PNG** - `.png`

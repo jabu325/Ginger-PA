@@ -41,7 +41,7 @@ Ginger-PA/
 
 ### Phase 1: Core Scraping ✅
 - [x] URL input with validation
-- [x] Format selection menu (GIF, WEBM, MP4, JPG, PNG)
+- [x] Format selection menu (GIF, WEBP, MP4, JPG, PNG)
 - [x] HTML retrieval with automatic retries
 - [x] HTML parsing with BeautifulSoup
 - [x] Media extraction from multiple HTML elements
@@ -90,7 +90,7 @@ Ginger-PA/
 ```python
 SUPPORTED_FORMATS = {
     'gif': ['.gif'],
-    'webm': ['.webm'],
+   'webp': ['.webp'],
     'mp4': ['.mp4'],
     'jpg': ['.jpg', '.jpeg'],
     'png': ['.png']

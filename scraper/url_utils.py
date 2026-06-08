@@ -13,7 +13,7 @@ class URLUtils:
     
     SUPPORTED_FORMATS = {
         'gif': ['.gif'],
-        'webm': ['.webm'],
+        'webp': ['.webp'],
         'mp4': ['.mp4'],
         'jpg': ['.jpg', '.jpeg'],
         'png': ['.png']

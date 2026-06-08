@@ -43,7 +43,7 @@ Validating URL...
 Select media formats to download:
 ----------------------------------------
 1. gif
-2. webm
+2. webp
 3. mp4
 4. jpg
 5. png
@@ -120,7 +120,7 @@ downloads/
 | Feature | Details |
 |---------|---------|
 | **URL Validation** | Checks format and reachability |
-| **Format Support** | GIF, WEBM, MP4, JPG, PNG |
+| **Format Support** | GIF, WEBP, MP4, JPG, PNG |
 | **Deduplication** | Prevents downloading same file twice |
 | **Progress Bars** | Real-time download progress |
 | **Error Recovery** | Continues if some files fail |
@@ -174,7 +174,7 @@ mkdir downloads
 | Format | Extensions | Example |
 |--------|-----------|---------|
 | GIF | .gif | `animation.gif` |
-| WEBM | .webm | `video.webm` |
+| WEBP | .webp | `image.webp` |
 | MP4 | .mp4 | `movie.mp4` |
 | JPG | .jpg, .jpeg | `photo.jpg` |
 | PNG | .png | `image.png` |

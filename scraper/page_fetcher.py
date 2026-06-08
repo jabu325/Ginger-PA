@@ -106,6 +106,29 @@ class PageFetcher:
         except Exception as e:
             return None, f"Unexpected error: {str(e)}"
     
+    def save_page_html(self, html: str, output_file: str | Path) -> Path:
+        """Save the fetched HTML page to a local file."""
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(html, encoding='utf-8')
+        logger.info(f"Saved page HTML to {output_path}")
+        return output_path
+
+    def load_local_html(self, file_path: str) -> tuple[str | None, str]:
+        """Load HTML content from a local file path."""
+        try:
+            path = Path(file_path).expanduser()
+            if not path.is_file():
+                return None, "Local file not found"
+            if path.suffix.lower() not in {'.html', '.htm'}:
+                return None, "File is not an HTML document"
+
+            html = path.read_text(encoding='utf-8', errors='ignore')
+            logger.info(f"Loaded local HTML file {path}")
+            return html, "Local HTML file loaded successfully"
+        except Exception as e:
+            return None, f"Local file read error: {e}"
+
     def close(self):
         """Close the session"""
         self.session.close()

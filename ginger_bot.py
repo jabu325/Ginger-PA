@@ -32,13 +32,11 @@ from memory_manager import (
     add_conversation,
 )
 from scraper import PageFetcher, MediaFinder, MediaDownloader
+from scraper.logging_config import setup_scraper_logging
 from scraper.url_utils import URLUtils
 
 # Setup logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+setup_scraper_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -157,7 +155,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Commands:\n"
         "/memory - Show what I remember\n"
         "/clear - Clear my memory\n"
-        "/download <formats> [limit] <url> - Download media from a webpage\n"
+        "/download <formats> [limit] <url_or_local_html_path> - Download media from a webpage or HTML file\n"
         "/start - Welcome message"
     )
 
@@ -169,19 +167,21 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     parsed = _parse_download_args(args)
     if not parsed:
         await update.message.reply_text(
-            "Usage: /download <formats> [limit] <url>\n"
-            "Example: /download gif 3 https://example.com/gallery"
+            "Usage: /download <formats> [limit] <url_or_local_html_path>\n"
+            "Example: /download gif 3 https://example.com/gallery\n"
+            "Example: /download gif 3 C:\\temp\\page.html"
         )
         return
 
-    formats, max_files, url = parsed
-    await update.message.reply_text(
-        f"Downloading up to {max_files or 'all'} {', '.join(formats)} file(s) from {url}..."
-    )
+    formats, max_files, url, is_local = parsed
+    intro = _format_download_intro(max_files, formats, Path(url).name if is_local else url)
+    await update.message.reply_text(intro)
 
     try:
-        output_dir, downloaded, failed = await asyncio.to_thread(_download_media_from_url, url, formats, max_files)
-        summary = _format_download_summary(output_dir, downloaded, failed)
+        output_dir, downloaded, failed, found_count, skipped = await asyncio.to_thread(
+            _download_media_from_url, url, formats, max_files, is_local
+        )
+        summary = _format_download_summary(output_dir, downloaded, failed, found_count, skipped)
         await update.message.reply_text(summary)
         if downloaded:
             await _send_downloaded_files(update, context, downloaded)
@@ -189,47 +189,77 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         error_msg = str(e)
         if '403' in error_msg:
             await update.message.reply_text(
-                f"⚠️ Access Denied (403)\n\n"
-                f"The website blocks media downloads. This is common on:\n"
-                f"• Sites with strong anti-scraping measures\n"
-                f"• Protected image galleries\n"
-                f"• Paid content sites\n\n"
-                f"Try a different website or URL."
+                "⚠️ Access Denied (403)\n\n"
+                "The website blocks media downloads. This is common on:\n"
+                "• Sites with strong anti-scraping measures\n"
+                "• Protected image galleries\n"
+                "• Paid content sites\n\n"
+                "Try a different website or URL."
             )
         else:
             logger.error(f"Download command error: {error_msg}")
             await update.message.reply_text(f"⚠️ Failed to download media: {error_msg}")
 
 
-def _create_output_directory(url: str) -> Path:
-    """Create a unique numbered output directory for each URL request."""
-    domain = URLUtils.get_domain_name(url)
+def _find_resume_download_directory(base_dir: Path, domain: str, source_url: str) -> Path | None:
+    """Return an existing download folder for the same source URL, if one exists."""
+    for candidate in sorted(base_dir.glob(f"{domain}*")):
+        if not candidate.is_dir():
+            continue
+        state_file = candidate / ".download_state.json"
+        if not state_file.exists():
+            continue
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            if state.get("source_url") == source_url:
+                return candidate
+        except Exception as e:
+            logger.warning(f"Could not read state for {candidate.name}: {e}")
+    return None
+
+
+def _is_local_html_path(path_str: str) -> bool:
+    try:
+        file_path = Path(path_str).expanduser()
+        return file_path.is_file() and file_path.suffix.lower() in {'.html', '.htm'}
+    except Exception:
+        return False
+
+
+def _create_output_directory(source: str, is_local: bool = False) -> Path:
+    """Create or reuse a download directory for the given source."""
+    if is_local:
+        domain = Path(source).stem
+    else:
+        domain = URLUtils.get_domain_name(source)
+
     base_dir = Path(__file__).resolve().parent / "downloads"
     base_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Find next available numbered folder
+
+    resume_dir = _find_resume_download_directory(base_dir, domain, source)
+    if resume_dir:
+        logger.info(f"Resuming download in existing folder: {resume_dir.name}")
+        return resume_dir
+
     counter = 1
     while True:
-        if counter == 1:
-            output_dir = base_dir / domain
-        else:
-            output_dir = base_dir / f"{domain}_{counter}"
-        
+        output_dir = base_dir / (domain if counter == 1 else f"{domain}_{counter}")
         if not output_dir.exists():
             output_dir.mkdir(parents=True, exist_ok=True)
             logger.info(f"Created download folder: {output_dir.name}")
             return output_dir
-        
         counter += 1
 
 
-def _parse_download_args(args: list[str]) -> tuple[list[str], int, str] | None:
+def _parse_download_args(args: list[str]) -> tuple[list[str], int, str, bool] | None:
     """Parse /download command arguments."""
     if len(args) < 2:
         return None
 
-    url = args[-1].strip()
-    if not URLUtils.validate_url(url):
+    source = args[-1].strip()
+    is_local = _is_local_html_path(source)
+    if not is_local and not URLUtils.validate_url(source):
         return None
 
     formats = []
@@ -247,22 +277,38 @@ def _parse_download_args(args: list[str]) -> tuple[list[str], int, str] | None:
     if not formats:
         formats = ['gif']
 
-    return formats, max_files, url
+    return formats, max_files, source, is_local
 
 
-def _extract_download_request(text: str) -> tuple[list[str], int, str] | None:
+def _extract_html_path(text: str) -> str | None:
+    candidates = re.findall(r"[A-Za-z0-9_\-\.\\/:]+\.(?:html|htm)", text, flags=re.IGNORECASE)
+    for candidate in candidates:
+        candidate = candidate.strip('"\'<>.,')
+        if _is_local_html_path(candidate):
+            return str(Path(candidate).expanduser())
+    return None
+
+
+def _extract_download_request(text: str) -> tuple[list[str], int, str, bool] | None:
     """Detect a natural-language download request and extract arguments."""
     text_lower = text.lower()
     if 'download' not in text_lower and 'grab' not in text_lower and 'fetch' not in text_lower:
         return None
 
+    source = None
+    is_local = False
     url_match = re.search(r"(https?://[^\s'\"]+)", text)
-    if not url_match:
-        return None
-
-    url = url_match.group(1).rstrip('.,!')
-    if not URLUtils.validate_url(url):
-        return None
+    if url_match:
+        source = url_match.group(1).rstrip('.,!')
+        if not URLUtils.validate_url(source):
+            return None
+    else:
+        html_path = _extract_html_path(text)
+        if html_path:
+            source = html_path
+            is_local = True
+        else:
+            return None
 
     formats = []
     for fmt in URLUtils.SUPPORTED_FORMATS:
@@ -278,8 +324,8 @@ def _extract_download_request(text: str) -> tuple[list[str], int, str] | None:
             formats = ['png']
         elif 'mp4' in text_lower:
             formats = ['mp4']
-        elif 'webm' in text_lower:
-            formats = ['webm']
+        elif 'webp' in text_lower:
+            formats = ['webp']
         else:
             return None
 
@@ -287,25 +333,49 @@ def _extract_download_request(text: str) -> tuple[list[str], int, str] | None:
     limit_match = re.search(r"limit\s+(\d+)", text_lower)
     if limit_match:
         max_files = int(limit_match.group(1))
+    else:
+        for fmt in URLUtils.SUPPORTED_FORMATS:
+            count_match = re.search(rf"\b(\d+)\s+{fmt}s?\b", text_lower)
+            if count_match:
+                max_files = int(count_match.group(1))
+                if fmt not in formats:
+                    formats = [fmt]
+                break
 
-    return formats, max_files, url
+    return formats, max_files, source, is_local
 
 
-def _download_media_from_url(url: str, formats: list[str], max_files: int = 0) -> tuple[Path, list[Path], list[str]]:
+def _download_media_from_url(url: str, formats: list[str], max_files: int = 0, is_local: bool = False) -> tuple[Path, list[Path], list[str], int, int]:
     """Download media from a URL and return the saved file paths."""
     fetcher = PageFetcher()
     downloader = MediaDownloader()
     try:
         logger.info(f"Starting download from {url} for formats: {formats}, max_files: {max_files}")
         
-        html, message = fetcher.fetch_page(url)
+        output_dir = _create_output_directory(url, is_local)
+        page_file = output_dir / "page.html"
+
+        if is_local:
+            html, message = fetcher.load_local_html(url)
+            base_url = Path(url).resolve().as_uri()
+            logger.info(f"Loading local HTML file for scraping: {url}")
+        elif page_file.exists():
+            html, message = fetcher.load_local_html(str(page_file))
+            base_url = url
+            logger.info(f"Using cached local page HTML: {page_file}")
+        else:
+            html, message = fetcher.fetch_page(url)
+            base_url = url
+            if html:
+                fetcher.save_page_html(html, page_file)
+
         if not html:
             raise ValueError(message)
-        
-        logger.info(f"Page fetched: {message}")
 
-        media_urls = MediaFinder.find_media_urls(html, url, formats)
-        logger.info(f"Found {len(media_urls)} media URLs")
+        logger.info(f"Page fetched: {message}")
+        media_urls = MediaFinder.find_media_urls(html, base_url, formats)
+        total_found = len(media_urls)
+        logger.info(f"Found {total_found} media URLs")
         
         if not media_urls:
             raise ValueError("No media files found matching the selected formats.")
@@ -314,38 +384,49 @@ def _download_media_from_url(url: str, formats: list[str], max_files: int = 0) -
             media_urls = media_urls[:max_files]
             logger.info(f"Limited to {len(media_urls)} files (requested {max_files})")
 
-        output_dir = _create_output_directory(url)
-        downloader.download_media(media_urls, str(output_dir), show_progress=False)
+        source_for_state = str(Path(url).resolve()) if is_local else url
+        stats = downloader.download_media(media_urls, str(output_dir), show_progress=False, resume=True, source_url=source_for_state)
 
-        downloaded = []
-        failed = downloader.download_stats.get('failed_urls', [])
-        for path in output_dir.iterdir():
-            if path.is_file():
-                downloaded.append(path)
+        downloaded = stats.get('downloaded_paths', [])
+        failed = stats.get('failed_urls', [])
+        skipped = stats.get('skipped', 0)
 
-        logger.info(f"Download complete: {len(downloaded)} successful, {len(failed)} failed")
+        logger.info(f"Download complete: {len(downloaded)} new files, {len(failed)} failed, {skipped} skipped")
         
-        if not downloaded and failed:
-            # All downloads failed
+        if not downloaded and len(failed) == len(media_urls):
             error_reason = "Access forbidden (403) - website blocks this scraper"
             if any('403' in str(err) for err in failed):
                 error_reason = "Access forbidden (403) - website blocks this scraper"
             raise ValueError(f"Could not download any files. Reason: {error_reason}")
 
-        return output_dir, downloaded, failed
+        return output_dir, downloaded, failed, total_found, skipped
     finally:
         fetcher.close()
         downloader.close()
 
 
-def _format_download_summary(output_dir: Path, downloaded: list[Path], failed: list[str]) -> str:
+def _format_download_summary(output_dir: Path, downloaded: list[Path], failed: list[str], total_found: int, skipped: int = 0) -> str:
     """Return a simple status summary for the bot."""
     lines = [
-        f"Downloaded {len(downloaded)} file(s) to {output_dir.name}."
+        f"Found {total_found} matching file(s).",
+        f"Downloaded {len(downloaded)} new file(s) to {output_dir.name}."
     ]
+    if skipped:
+        lines.append(f"Skipped {skipped} previously downloaded file(s).")
     if failed:
         lines.append(f"Failed downloads: {len(failed)}")
     return "\n".join(lines)
+
+
+def _format_download_intro(max_files: int, formats: list[str], url: str, prefix: str = "") -> str:
+    """Return a natural download intro message."""
+    if max_files > 0:
+        if len(formats) == 1:
+            format_name = formats[0]
+            plural = format_name + "s" if max_files != 1 else format_name
+            return f"{prefix}Downloading {max_files} {plural} from {url}..."
+        return f"{prefix}Downloading up to {max_files} matching {', '.join(formats)} file(s) from {url}..."
+    return f"{prefix}Downloading all matching {', '.join(formats)} file(s) from {url}..."
 
 
 def _get_media_sender_method(file_path: Path):
@@ -354,8 +435,10 @@ def _get_media_sender_method(file_path: Path):
         return 'animation'
     if suffix in ['.jpg', '.jpeg', '.png']:
         return 'photo'
-    if suffix in ['.mp4', '.webm']:
+    if suffix in ['.mp4']:
         return 'video'
+    if suffix == '.webp' or suffix in ['.webp']:
+        return 'photo'
     return 'document'
 
 
@@ -431,13 +514,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Check for natural download request in text
     download_request = _extract_download_request(user_message)
     if download_request:
-        formats, max_files, url = download_request
-        await update.message.reply_text(
-            f"Sure! Downloading up to {max_files or 'all'} {', '.join(formats)} file(s) from {url}..."
-        )
+        formats, max_files, url, is_local = download_request
+        intro = _format_download_intro(max_files, formats, Path(url).name if is_local else url, prefix="Sure! ")
+        await update.message.reply_text(intro)
         try:
-            output_dir, downloaded, failed = await asyncio.to_thread(_download_media_from_url, url, formats, max_files)
-            summary = _format_download_summary(output_dir, downloaded, failed)
+            output_dir, downloaded, failed, found_count, skipped = await asyncio.to_thread(_download_media_from_url, url, formats, max_files, is_local)
+            summary = _format_download_summary(output_dir, downloaded, failed, found_count, skipped)
             await update.message.reply_text(summary)
             if downloaded:
                 await _send_downloaded_files(update, context, downloaded)
